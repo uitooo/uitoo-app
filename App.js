@@ -21,6 +21,22 @@ const SUPABASE_ANON_KEY = 'sb_publishable_EX8L6YF7xm155rN0-SX6mA_-EhYNCYQ';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// Función auxiliar para fecha relativa
+function formatFecha(fechaString) {
+  if (!fechaString) return '';
+  const fecha = new Date(fechaString);
+  const ahora = new Date();
+  const diferenciaMinutos = Math.floor((ahora - fecha) / (1000 * 60));
+
+  if (diferenciaMinutos < 1) return 'Ahora mismo';
+  if (diferenciaMinutos < 60) return `Hace ${diferenciaMinutos} min`;
+  
+  const horas = Math.floor(diferenciaMinutos / 60);
+  if (horas < 24) return `Hace ${horas} h`;
+  
+  return fecha.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' });
+}
+
 export default function App() {
   const [session, setSession] = useState(null);
   const [email, setEmail] = useState('');
@@ -43,8 +59,12 @@ export default function App() {
   const [adminUrl, setAdminUrl] = useState('');
   const [newUsername, setNewUsername] = useState('');
 
-  // Estados de interacciones
+  // Estados de interacciones y comentarios
   const [interactions, setInteractions] = useState({});
+  const [selectedPostForComments, setSelectedPostForComments] = useState(null);
+  const [comments, setComments] = useState([]);
+  const [newCommentContent, setNewCommentContent] = useState('');
+  const [isCommentsModal, setIsCommentsModal] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -64,7 +84,17 @@ export default function App() {
     try {
       const { data: postsData, error: postsError } = await supabase
         .from('posts')
-        .select('*, profiles(username, avatar_url)')
+        .select(`
+          id,
+          content,
+          media_url,
+          created_at,
+          user_id,
+          profiles (
+            username,
+            avatar_url
+          )
+        `)
         .order('created_at', { ascending: false });
 
       if (!postsError && postsData) setPosts(postsData);
@@ -76,6 +106,57 @@ export default function App() {
       if (!countError) setTotalUsersCount(count || 0);
     } catch (e) {
       console.log('Error cargando datos:', e.message);
+    }
+  };
+
+  const fetchComments = async (postId) => {
+    try {
+      const { data, error } = await supabase
+        .from('comments')
+        .select(`
+          id,
+          content,
+          created_at,
+          profiles (
+            username,
+            avatar_url
+          )
+        `)
+        .eq('post_id', postId)
+        .order('created_at', { ascending: true });
+
+      if (!error && data) {
+        setComments(data);
+      }
+    } catch (e) {
+      console.log('Error cargando comentarios:', e.message);
+    }
+  };
+
+  const handleOpenComments = (post) => {
+    setSelectedPostForComments(post);
+    setIsCommentsModal(true);
+    fetchComments(post.id);
+  };
+
+  const handleCreateComment = async () => {
+    if (!newCommentContent.trim() || !selectedPostForComments) return;
+
+    try {
+      const { error } = await supabase.from('comments').insert([
+        {
+          post_id: selectedPostForComments.id,
+          user_id: session.user.id,
+          content: newCommentContent.trim()
+        }
+      ]);
+
+      if (error) throw error;
+
+      setNewCommentContent('');
+      fetchComments(selectedPostForComments.id);
+    } catch (error) {
+      Alert.alert('Error', 'No se pudo enviar el comentario: ' + error.message);
     }
   };
 
@@ -285,18 +366,27 @@ export default function App() {
                 keyExtractor={(item) => item.id ? item.id.toString() : Math.random().toString()}
                 renderItem={({ item }) => {
                   const itemInteractions = interactions[item.id] || { sameProcess: 0, support: 0, join: 0 };
+                  const profile = item.profiles || {};
+                  const avatarUri = profile.avatar_url || 'https://via.placeholder.com/150';
+
                   return (
                     <View style={styles.postCard}>
-                      <View style={styles.postHeader}>
-                        <Text style={styles.postUser}>@{item.profiles?.username || 'Usuario'}</Text>
+                      {/* Encabezado del Post: Avatar, Nombre y Fecha */}
+                      <View style={styles.postHeaderRow}>
+                        <Image source={{ uri: avatarUri }} style={styles.postAvatar} />
+                        <View style={styles.postHeaderText}>
+                          <Text style={styles.postUser}>@{profile.username || 'Usuario'}</Text>
+                          <Text style={styles.postDate}>{formatFecha(item.created_at)}</Text>
+                        </View>
                       </View>
+
                       <Text style={styles.postContent}>{item.content}</Text>
                       
                       {item.media_url ? (
                         <Image source={{ uri: item.media_url }} style={styles.postImage} />
                       ) : null}
 
-                      {/* Botones de interacción debajo del post */}
+                      {/* Botones de interacción y comentarios */}
                       <View style={styles.interactionBar}>
                         <TouchableOpacity 
                           style={styles.actionBtn}
@@ -320,6 +410,14 @@ export default function App() {
                         >
                           <Text style={styles.actionIcon}>✋</Text>
                           <Text style={styles.actionLabel}>Vincular ({itemInteractions.join})</Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity 
+                          style={styles.actionBtnComments}
+                          onPress={() => handleOpenComments(item)}
+                        >
+                          <Text style={styles.actionIcon}>💬</Text>
+                          <Text style={styles.actionLabel}>Comentar</Text>
                         </TouchableOpacity>
                       </View>
                     </View>
@@ -461,6 +559,59 @@ export default function App() {
             </View>
           </View>
         </Modal>
+
+        {/* MODAL DE COMENTARIOS */}
+        <Modal visible={isCommentsModal} animationType="slide" transparent={true}>
+          <View style={styles.modalOverlay}>
+            <View style={[styles.modalContent, { height: '80%' }]}>
+              <View style={styles.commentsModalHeader}>
+                <Text style={styles.sectionTitle}>Comentarios</Text>
+                <TouchableOpacity onPress={() => setIsCommentsModal(false)}>
+                  <Text style={{ color: '#8B5CF6', fontWeight: 'bold', fontSize: 16 }}>Cerrar</Text>
+                </TouchableOpacity>
+              </View>
+
+              <FlatList
+                data={comments}
+                keyExtractor={(item) => item.id}
+                renderItem={({ item }) => {
+                  const commentProfile = item.profiles || {};
+                  const commentAvatar = commentProfile.avatar_url || 'https://via.placeholder.com/150';
+                  return (
+                    <View style={styles.commentItem}>
+                      <Image source={{ uri: commentAvatar }} style={styles.commentAvatar} />
+                      <View style={{ flex: 1 }}>
+                        <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                          <Text style={styles.commentUser}>@{commentProfile.username || 'Usuario'}</Text>
+                          <Text style={styles.commentDate}>{formatFecha(item.created_at)}</Text>
+                        </View>
+                        <Text style={styles.commentText}>{item.content}</Text>
+                      </View>
+                    </View>
+                  );
+                }}
+                ListEmptyComponent={
+                  <Text style={styles.emptyText}>No hay comentarios aún. ¡Sé el primero en opinar!</Text>
+                }
+                style={{ flex: 1, marginVertical: 10 }}
+              />
+
+              <View style={styles.commentInputContainer}>
+                <TextInput
+                  style={styles.commentInput}
+                  placeholder="Escribe un comentario..."
+                  placeholderTextColor="#94A3B8"
+                  value={newCommentContent}
+                  onChangeText={setNewCommentContent}
+                />
+                <TouchableOpacity style={styles.commentSendButton} onPress={handleCreateComment}>
+                  <Text style={styles.buttonText}>Enviar</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+
       </SafeAreaView>
     );
   }
@@ -539,12 +690,16 @@ const styles = StyleSheet.create({
   tabSubtitle: { color: '#94A3B8', marginBottom: 16 },
   tabContent: { paddingBottom: 40 },
   postCard: { backgroundColor: '#1E293B', padding: 16, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: '#334155' },
-  postHeader: { marginBottom: 8 },
+  postHeaderRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  postAvatar: { width: 36, height: 36, borderRadius: 18, marginRight: 10, backgroundColor: '#334155' },
+  postHeaderText: { flexDirection: 'column' },
   postUser: { color: '#8B5CF6', fontWeight: 'bold', fontSize: 14 },
+  postDate: { color: '#64748B', fontSize: 11 },
   postContent: { color: '#F8FAFC', fontSize: 15, marginBottom: 12 },
   postImage: { width: '100%', height: 200, borderRadius: 8, marginBottom: 12 },
   interactionBar: { flexDirection: 'row', justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: '#334155', paddingTop: 10 },
   actionBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0F172A', paddingHorizontal: 6, paddingVertical: 6, borderRadius: 8 },
+  actionBtnComments: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#334155', paddingHorizontal: 8, paddingVertical: 6, borderRadius: 8 },
   actionIcon: { fontSize: 13, marginRight: 2 },
   actionLabel: { color: '#94A3B8', fontSize: 10, fontWeight: '600' },
   emptyText: { color: '#94A3B8', textAlign: 'center', marginTop: 40 },
@@ -577,5 +732,14 @@ const styles = StyleSheet.create({
   switchButton: { marginTop: 20, padding: 8 },
   switchText: { color: '#8B5CF6', fontSize: 14, textAlign: 'center', fontWeight: '600' },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', padding: 24 },
-  modalContent: { backgroundColor: '#0F172A', padding: 24, borderRadius: 16, borderWidth: 1, borderColor: '#334155' }
+  modalContent: { backgroundColor: '#0F172A', padding: 24, borderRadius: 16, borderWidth: 1, borderColor: '#334155' },
+  commentsModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#1E293B', paddingBottom: 10 },
+  commentItem: { flexDirection: 'row', marginBottom: 14, borderBottomWidth: 1, borderBottomColor: '#1E293B', paddingBottom: 10 },
+  commentAvatar: { width: 30, height: 30, borderRadius: 15, marginRight: 10, backgroundColor: '#334155' },
+  commentUser: { color: '#8B5CF6', fontWeight: 'bold', fontSize: 13 },
+  commentDate: { color: '#64748B', fontSize: 10 },
+  commentText: { color: '#F8FAFC', fontSize: 13, marginTop: 4 },
+  commentInputContainer: { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
+  commentInput: { flex: 1, backgroundColor: '#1E293B', color: '#FFFFFF', padding: 12, borderRadius: 8, marginRight: 8, borderWidth: 1, borderColor: '#334155' },
+  commentSendButton: { backgroundColor: '#8B5CF6', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 8, justifyContent: 'center' }
 });
