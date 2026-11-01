@@ -10,7 +10,8 @@ import {
   ActivityIndicator, 
   Alert,
   FlatList,
-  Modal
+  Modal,
+  SafeAreaView
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { createClient } from '@supabase/supabase-js';
@@ -29,7 +30,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [isLogin, setIsLogin] = useState(false);
 
-  // Estados del Dashboard principal y Pestañas
+  // Estados del Dashboard y Pestañas
   const [currentTab, setCurrentTab] = useState('feed'); // 'feed', 'academy', 'plus', 'profile', 'admin'
   const [posts, setPosts] = useState([]);
   const [newPostContent, setNewPostContent] = useState('');
@@ -51,10 +52,12 @@ export default function App() {
       if (session) fetchAppData();
     });
 
-    supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
       if (session) fetchAppData();
     });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   const fetchAppData = async () => {
@@ -165,10 +168,15 @@ export default function App() {
           .from('uitoo-media')
           .upload(fileName, blob);
 
-        if (!uploadError) {
-          const { data: urlData } = supabase.storage.from('uitoo-media').getPublicUrl(fileName);
-          postMediaUrl = urlData.publicUrl;
+        if (uploadError) {
+          throw new Error('Error al subir la imagen al storage: ' + uploadError.message);
         }
+
+        const { data: urlData } = supabase.storage
+          .from('uitoo-media')
+          .getPublicUrl(fileName);
+          
+        postMediaUrl = urlData.publicUrl;
       }
 
       const { error } = await supabase.from('posts').insert([
@@ -187,7 +195,7 @@ export default function App() {
       fetchAppData();
       Alert.alert('¡Éxito!', 'Tu avance ha sido publicado.');
     } catch (error) {
-      Alert.alert('Error', error.message);
+      Alert.alert('Error al publicar', error.message);
     }
   };
 
@@ -246,10 +254,10 @@ export default function App() {
     }
   };
 
-  // --- INTERFAZ PRINCIPAL CON PESTAÑAS ---
+  // --- INTERFAZ PRINCIPAL CON PESTAÑAS Y NAVEGACIÓN ---
   if (session && session.user) {
     return (
-      <View style={styles.dashboardContainer}>
+      <SafeAreaView style={styles.dashboardContainer}>
         {/* Cabecera */}
         <View style={styles.headerBar}>
           <Text style={styles.dashboardTitle}>UITOO</Text>
@@ -393,7 +401,7 @@ export default function App() {
           )}
         </View>
 
-        {/* BARRA DE NAVEGACIÓN INFERIOR */}
+        {/* BARRA DE NAVEGACIÓN INFERIOR FIJA */}
         <View style={styles.navBar}>
           <TouchableOpacity onPress={() => setCurrentTab('feed')} style={styles.navItem}>
             <Text style={[styles.navText, currentTab === 'feed' && styles.navActive]}>Feed</Text>
@@ -453,7 +461,7 @@ export default function App() {
             </View>
           </View>
         </Modal>
-      </View>
+      </SafeAreaView>
     );
   }
 
@@ -519,8 +527,8 @@ export default function App() {
 
 const styles = StyleSheet.create({
   container: { flexGrow: 1, backgroundColor: '#0F172A', alignItems: 'center', justifyContent: 'center', padding: 24 },
-  dashboardContainer: { flex: 1, backgroundColor: '#0F172A', paddingTop: 40 },
-  headerBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#1E293B' },
+  dashboardContainer: { flex: 1, backgroundColor: '#0F172A' },
+  headerBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#1E293B' },
   dashboardTitle: { fontSize: 24, fontWeight: 'bold', color: '#8B5CF6' },
   logoutText: { color: '#EF4444', fontWeight: 'bold', fontSize: 14 },
   contentArea: { flex: 1, padding: 16 },
