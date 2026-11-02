@@ -47,7 +47,7 @@ export default function App() {
   const [isLogin, setIsLogin] = useState(false);
 
   // Estados del Dashboard y Pestañas
-  const [currentTab, setCurrentTab] = useState('feed'); // 'feed', 'academy', 'plus', 'profile', 'admin'
+  const [currentTab, setCurrentTab] = useState('feed'); // 'feed', 'academy', 'plus', 'profile', 'admin', 'userProfile'
   const [posts, setPosts] = useState([]);
   const [newPostContent, setNewPostContent] = useState('');
   const [postImageUri, setPostImageUri] = useState(null);
@@ -65,6 +65,17 @@ export default function App() {
   const [comments, setComments] = useState([]);
   const [newCommentContent, setNewCommentContent] = useState('');
   const [isCommentsModal, setIsCommentsModal] = useState(false);
+
+  // Estados para conteo y último comentario por post: { [postId]: { count: 0, lastComment: null } }
+  const [postCommentsMeta, setPostCommentsMeta] = useState({});
+
+  // Estados para ver perfiles de otros usuarios (Muro propio)
+  const [selectedUserId, setSelectedUserId] = useState(null);
+  const [selectedUsername, setSelectedUsername] = useState('');
+
+  // Estado para visor de imagen en pantalla completa
+  const [fullScreenImageUri, setFullScreenImageUri] = useState(null);
+  const [isFullScreenModal, setIsFullScreenModal] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -97,7 +108,10 @@ export default function App() {
         `)
         .order('created_at', { ascending: false });
 
-      if (!postsError && postsData) setPosts(postsData);
+      if (!postsError && postsData) {
+        setPosts(postsData);
+        fetchPostsCommentsMeta(postsData);
+      }
 
       const { count, error: countError } = await supabase
         .from('profiles')
@@ -106,6 +120,38 @@ export default function App() {
       if (!countError) setTotalUsersCount(count || 0);
     } catch (e) {
       console.log('Error cargando datos:', e.message);
+    }
+  };
+
+  const fetchPostsCommentsMeta = async (postsList) => {
+    try {
+      const metaMap = {};
+      for (let post of postsList) {
+        const { data, count, error } = await supabase
+          .from('comments')
+          .select(`
+            id,
+            content,
+            created_at,
+            profiles (
+              username
+            )
+          `, { count: 'exact' })
+          .eq('post_id', post.id)
+          .order('created_at', { ascending: false });
+
+        if (!error && data) {
+          metaMap[post.id] = {
+            count: count || data.length,
+            lastComment: data.length > 0 ? data[0] : null
+          };
+        } else {
+          metaMap[post.id] = { count: 0, lastComment: null };
+        }
+      }
+      setPostCommentsMeta(metaMap);
+    } catch (e) {
+      console.log('Error cargando metadatos de comentarios:', e.message);
     }
   };
 
@@ -139,22 +185,67 @@ export default function App() {
     fetchComments(post.id);
   };
 
+  const handleOpenUserProfile = (userId, username) => {
+    setSelectedUserId(userId);
+    setSelectedUsername(username || 'Usuario');
+    setCurrentTab('userProfile');
+  };
+
+  const handleOpenFullScreenImage = (uri) => {
+    setFullScreenImageUri(uri);
+    setIsFullScreenModal(true);
+  };
+
   const handleCreateComment = async () => {
     if (!newCommentContent.trim() || !selectedPostForComments) return;
 
     try {
-      const { error } = await supabase.from('comments').insert([
+      // 1. Insertar el comentario incluyendo el perfil del usuario actual para actualizar el estado instantáneamente
+      const { data, error } = await supabase.from('comments').insert([
         {
           post_id: selectedPostForComments.id,
           user_id: session.user.id,
           content: newCommentContent.trim()
         }
-      ]);
+      ]).select(`
+        id,
+        content,
+        created_at,
+        profiles (
+          username,
+          avatar_url
+        )
+      `);
 
       if (error) throw error;
 
+      // 2. Limpiar input
       setNewCommentContent('');
-      fetchComments(selectedPostForComments.id);
+
+      // 3. Recargar comentarios del modal actual
+      await fetchComments(selectedPostForComments.id);
+
+      // 4. Actualizar inmediatamente los metadatos del feed (conteo y último comentario)
+      if (data && data.length > 0) {
+        const newCommentItem = data[0];
+        setPostCommentsMeta(prev => {
+          const currentMeta = prev[selectedPostForComments.id] || { count: 0 };
+          return {
+            ...prev,
+            [selectedPostForComments.id]: {
+              count: currentMeta.count + 1,
+              lastComment: {
+                content: newCommentItem.content,
+                profiles: { username: session.user.user_metadata?.username || username }
+              }
+            }
+          };
+        });
+      }
+
+      // Opcional: refrescar metadatos completos para asegurar sincronización con la BD
+      fetchPostsCommentsMeta(posts);
+
     } catch (error) {
       Alert.alert('Error', 'No se pudo enviar el comentario: ' + error.message);
     }
@@ -335,6 +426,92 @@ export default function App() {
     }
   };
 
+  // Función reutilizable para renderizar tarjetas de post con el último comentario fijado
+  const renderPostItem = ({ item }) => {
+    const itemInteractions = interactions[item.id] || { sameProcess: 0, support: 0, join: 0 };
+    const profile = item.profiles || {};
+    const avatarUri = profile.avatar_url || 'https://via.placeholder.com/150';
+    const commentMeta = postCommentsMeta[item.id] || { count: 0, lastComment: null };
+
+    return (
+      <View style={styles.postCard}>
+        {/* Encabezado del Post: Avatar, Nombre y Fecha (Clickeable para ver muro) */}
+        <View style={styles.postHeaderRow}>
+          <TouchableOpacity 
+            style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}
+            onPress={() => handleOpenUserProfile(item.user_id, profile.username)}
+          >
+            <Image source={{ uri: avatarUri }} style={styles.postAvatar} />
+            <View style={styles.postHeaderText}>
+              <Text style={styles.postUser}>@{profile.username || 'Usuario'}</Text>
+              <Text style={styles.postDate}>{formatFecha(item.created_at)}</Text>
+            </View>
+          </TouchableOpacity>
+        </View>
+
+        <Text style={styles.postContent}>{item.content}</Text>
+        
+        {item.media_url ? (
+          <TouchableOpacity onPress={() => handleOpenFullScreenImage(item.media_url)}>
+            <Image source={{ uri: item.media_url }} style={styles.postImage} resizeMode="contain" />
+          </TouchableOpacity>
+        ) : null}
+
+        {/* Sección del último comentario fijado y conteo */}
+        <View style={styles.commentsPreviewContainer}>
+          <TouchableOpacity onPress={() => handleOpenComments(item)} style={styles.commentsPreviewHeader}>
+            <Text style={styles.commentsCountText}>💬 Comentarios ({commentMeta.count})</Text>
+            <Text style={styles.viewAllCommentsText}>Ver todos →</Text>
+          </TouchableOpacity>
+
+          {commentMeta.lastComment ? (
+            <View style={styles.lastCommentBox}>
+              <Text style={styles.lastCommentUser}>@{commentMeta.lastComment.profiles?.username || 'Usuario'}:</Text>
+              <Text style={styles.lastCommentText} numberOfLines={2}>{commentMeta.lastComment.content}</Text>
+            </View>
+          ) : (
+            <Text style={styles.noCommentsPreviewText}>No hay comentarios aún. ¡Sé el primero en opinar!</Text>
+          )}
+        </View>
+
+        {/* Botones de interacción y comentarios */}
+        <View style={styles.interactionBar}>
+          <TouchableOpacity 
+            style={styles.actionBtn}
+            onPress={() => handleInteraction(item.id, 'sameProcess')}
+          >
+            <Text style={styles.actionIcon}>🔄</Text>
+            <Text style={styles.actionLabel}>También ({itemInteractions.sameProcess})</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={styles.actionBtn}
+            onPress={() => handleInteraction(item.id, 'support')}
+          >
+            <Text style={styles.actionIcon}>💪</Text>
+            <Text style={styles.actionLabel}>Apoyo ({itemInteractions.support})</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={styles.actionBtn}
+            onPress={() => handleInteraction(item.id, 'join')}
+          >
+            <Text style={styles.actionIcon}>✋</Text>
+            <Text style={styles.actionLabel}>Vincular ({itemInteractions.join})</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={styles.actionBtnComments}
+            onPress={() => handleOpenComments(item)}
+          >
+            <Text style={styles.actionIcon}>💬</Text>
+            <Text style={styles.actionLabel}>Comentar</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
+
   // --- INTERFAZ PRINCIPAL CON PESTAÑAS Y NAVEGACIÓN ---
   if (session && session.user) {
     return (
@@ -364,67 +541,29 @@ export default function App() {
               <FlatList
                 data={posts}
                 keyExtractor={(item) => item.id ? item.id.toString() : Math.random().toString()}
-                renderItem={({ item }) => {
-                  const itemInteractions = interactions[item.id] || { sameProcess: 0, support: 0, join: 0 };
-                  const profile = item.profiles || {};
-                  const avatarUri = profile.avatar_url || 'https://via.placeholder.com/150';
-
-                  return (
-                    <View style={styles.postCard}>
-                      {/* Encabezado del Post: Avatar, Nombre y Fecha */}
-                      <View style={styles.postHeaderRow}>
-                        <Image source={{ uri: avatarUri }} style={styles.postAvatar} />
-                        <View style={styles.postHeaderText}>
-                          <Text style={styles.postUser}>@{profile.username || 'Usuario'}</Text>
-                          <Text style={styles.postDate}>{formatFecha(item.created_at)}</Text>
-                        </View>
-                      </View>
-
-                      <Text style={styles.postContent}>{item.content}</Text>
-                      
-                      {item.media_url ? (
-                        <Image source={{ uri: item.media_url }} style={styles.postImage} />
-                      ) : null}
-
-                      {/* Botones de interacción y comentarios */}
-                      <View style={styles.interactionBar}>
-                        <TouchableOpacity 
-                          style={styles.actionBtn}
-                          onPress={() => handleInteraction(item.id, 'sameProcess')}
-                        >
-                          <Text style={styles.actionIcon}>🔄</Text>
-                          <Text style={styles.actionLabel}>También ({itemInteractions.sameProcess})</Text>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity 
-                          style={styles.actionBtn}
-                          onPress={() => handleInteraction(item.id, 'support')}
-                        >
-                          <Text style={styles.actionIcon}>💪</Text>
-                          <Text style={styles.actionLabel}>Apoyo ({itemInteractions.support})</Text>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity 
-                          style={styles.actionBtn}
-                          onPress={() => handleInteraction(item.id, 'join')}
-                        >
-                          <Text style={styles.actionIcon}>✋</Text>
-                          <Text style={styles.actionLabel}>Vincular ({itemInteractions.join})</Text>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity 
-                          style={styles.actionBtnComments}
-                          onPress={() => handleOpenComments(item)}
-                        >
-                          <Text style={styles.actionIcon}>💬</Text>
-                          <Text style={styles.actionLabel}>Comentar</Text>
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  );
-                }}
+                renderItem={renderPostItem}
                 ListEmptyComponent={
                   <Text style={styles.emptyText}>No hay publicaciones aún. ¡Sé el primero en compartir tu avance!</Text>
+                }
+              />
+            </View>
+          )}
+
+          {currentTab === 'userProfile' && (
+            <View style={{ flex: 1, width: '100%' }}>
+              <View style={styles.feedHeader}>
+                <TouchableOpacity onPress={() => setCurrentTab('feed')} style={{ marginBottom: 8 }}>
+                  <Text style={{ color: '#8B5CF6', fontWeight: 'bold' }}>← Volver al Feed</Text>
+                </TouchableOpacity>
+                <Text style={styles.sectionTitle}>Muro de @{selectedUsername}</Text>
+              </View>
+
+              <FlatList
+                data={posts.filter(p => p.user_id === selectedUserId)}
+                keyExtractor={(item) => item.id ? item.id.toString() : Math.random().toString()}
+                renderItem={renderPostItem}
+                ListEmptyComponent={
+                  <Text style={styles.emptyText}>Este usuario aún no ha publicado ningún avance.</Text>
                 }
               />
             </View>
@@ -612,6 +751,25 @@ export default function App() {
           </View>
         </Modal>
 
+        {/* MODAL PARA VER IMAGEN EN TAMAÑO COMPLETO */}
+        <Modal visible={isFullScreenModal} animationType="fade" transparent={true}>
+          <View style={styles.fullScreenOverlay}>
+            <TouchableOpacity 
+              style={styles.closeFullScreenButton} 
+              onPress={() => setIsFullScreenModal(false)}
+            >
+              <Text style={{ color: '#FFFFFF', fontWeight: 'bold', fontSize: 16 }}>✕ Cerrar</Text>
+            </TouchableOpacity>
+            {fullScreenImageUri ? (
+              <Image 
+                source={{ uri: fullScreenImageUri }} 
+                style={styles.fullScreenImage} 
+                resizeMode="contain" 
+              />
+            ) : null}
+          </View>
+        </Modal>
+
       </SafeAreaView>
     );
   }
@@ -696,7 +854,15 @@ const styles = StyleSheet.create({
   postUser: { color: '#8B5CF6', fontWeight: 'bold', fontSize: 14 },
   postDate: { color: '#64748B', fontSize: 11 },
   postContent: { color: '#F8FAFC', fontSize: 15, marginBottom: 12 },
-  postImage: { width: '100%', height: 200, borderRadius: 8, marginBottom: 12 },
+  postImage: { width: '100%', height: 280, borderRadius: 8, marginBottom: 12, backgroundColor: '#0F172A' },
+  commentsPreviewContainer: { backgroundColor: '#0F172A', borderRadius: 8, padding: 10, marginBottom: 12, borderWidth: 1, borderColor: '#334155' },
+  commentsPreviewHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  commentsCountText: { color: '#8B5CF6', fontWeight: 'bold', fontSize: 12 },
+  viewAllCommentsText: { color: '#94A3B8', fontSize: 12, textDecorationLine: 'underline' },
+  lastCommentBox: { flexDirection: 'row', flexWrap: 'wrap' },
+  lastCommentUser: { color: '#8B5CF6', fontWeight: 'bold', fontSize: 12, marginRight: 6 },
+  lastCommentText: { color: '#E2E8F0', fontSize: 12, flex: 1 },
+  noCommentsPreviewText: { color: '#64748B', fontSize: 12, fontStyle: 'italic' },
   interactionBar: { flexDirection: 'row', justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: '#334155', paddingTop: 10 },
   actionBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0F172A', paddingHorizontal: 6, paddingVertical: 6, borderRadius: 8 },
   actionBtnComments: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#334155', paddingHorizontal: 8, paddingVertical: 6, borderRadius: 8 },
@@ -741,5 +907,8 @@ const styles = StyleSheet.create({
   commentText: { color: '#F8FAFC', fontSize: 13, marginTop: 4 },
   commentInputContainer: { flexDirection: 'row', alignItems: 'center', marginTop: 10 },
   commentInput: { flex: 1, backgroundColor: '#1E293B', color: '#FFFFFF', padding: 12, borderRadius: 8, marginRight: 8, borderWidth: 1, borderColor: '#334155' },
-  commentSendButton: { backgroundColor: '#8B5CF6', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 8, justifyContent: 'center' }
+  commentSendButton: { backgroundColor: '#8B5CF6', paddingVertical: 12, paddingHorizontal: 16, borderRadius: 8, justifyContent: 'center' },
+  fullScreenOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center', alignItems: 'center' },
+  closeFullScreenButton: { position: 'absolute', top: 40, right: 20, zIndex: 10, backgroundColor: '#1E293B', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 8 },
+  fullScreenImage: { width: '100%', height: '80%' }
 });
